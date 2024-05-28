@@ -1,53 +1,19 @@
 "use strict";
 
 const {
+  fetchLeague,
   fetchLeagueRosters,
   fetchLeagueUsers,
   fetchLeagueDrafts,
   fetchLeagueTradedPicks,
-  fetchLeague,
 } = require("../api/sleeperApi");
 const db = require("../models");
 const User = db.users;
 const League = db.leagues;
 const Draft = db.drafts;
-const DraftPick = db.draftpicks;
-
-const splitLeagues = async (leagues, cutoff) => {
-  const leagues_db = await League.findAll({
-    where: {
-      league_id: leagues.map((league) => league.league_id),
-    },
-    raw: true,
-  });
-
-  const leagues_to_add = leagues.filter(
-    (l) => !leagues_db?.find((l_db) => l.league_id === l_db.league_id)
-  );
-
-  const leagues_to_update = leagues_db.filter(
-    (l) =>
-      l.updatedAt < cutoff ||
-      (Array.isArray(l.rosters) && l.rosters?.length === 0)
-  );
-
-  const leagues_up_to_date = leagues_db.filter(
-    (l) => !leagues_to_update.find((l2) => l.league_id === l2.league_id)
-  );
-
-  return [leagues_to_add, leagues_to_update, leagues_up_to_date];
-};
 
 const updateLeagueRostersUsers = (rosters, users) => {
   let rosters_w_username = [];
-
-  const standings = rosters
-    ?.sort(
-      (a, b) =>
-        (b.settings?.wins ?? 0) - (a.settings?.wins ?? 0) ||
-        (b.settings?.fpts ?? 0) - (a.settings?.fpts ?? 0)
-    )
-    ?.map((roster) => roster.roster_id);
 
   for (const roster of rosters) {
     const user = users.find((u) => u.user_id === roster.owner_id);
@@ -61,10 +27,7 @@ const updateLeagueRostersUsers = (rosters, users) => {
       };
     });
 
-    const rank = standings && standings?.indexOf(roster.roster_id) + 1;
-
     rosters_w_username.push({
-      rank: rank,
       taxi: roster.taxi,
       starters: roster.starters,
       settings: roster.settings,
@@ -84,10 +47,14 @@ const updateLeagueRostersUsers = (rosters, users) => {
 const getLeagueDraftPicks = ({ league, rosters, drafts, traded_picks }) => {
   let draft_picks_league = {};
 
+  // only get picks if league is dynasty and at least 1 roster has players on it
+
   if (
     league.settings.type === 2 &&
     rosters?.find((r) => r.players?.length > 0)
   ) {
+    // check if rookie draft for current season has occurred
+
     let draft_season;
 
     const upcoming_draft = drafts.find(
@@ -107,14 +74,22 @@ const getLeagueDraftPicks = ({ league, rosters, drafts, traded_picks }) => {
     rosters.forEach((roster) => {
       draft_picks_league[roster.roster_id] = [];
 
+      // loop through seasons (draft season and next two seasons)
+
       for (let j = draft_season; j <= draft_season + 2; j++) {
+        // loop through rookie draft rounds
+
         for (let k = 1; k <= league.settings.draft_rounds; k++) {
+          // check if each rookie pick is in traded picks
+
           const isTraded = traded_picks.find(
             (pick) =>
               parseInt(pick.season) === j &&
               pick.round === k &&
               pick.roster_id === roster.roster_id
           );
+
+          // if it is not in traded picks, add to original manager
 
           if (!isTraded) {
             draft_picks_league[roster.roster_id].push({
@@ -187,100 +162,115 @@ const getLeagueDraftPicks = ({ league, rosters, drafts, traded_picks }) => {
 const updateLeagues = async (league_ids) => {
   const leagues_to_add = await Promise.all(
     league_ids.map(async (league_id) => {
-      const league = await fetchLeague(league_id);
-      const rosters = await fetchLeagueRosters(league_id);
-      const users = await fetchLeagueUsers(league_id);
+      try {
+        const league = await fetchLeague(league_id);
 
-      const updated_rosters = updateLeagueRostersUsers(rosters, users);
+        const rosters = await fetchLeagueRosters(league.league_id);
+        const users = await fetchLeagueUsers(league.league_id);
 
-      const drafts = await fetchLeagueDrafts(league_id);
+        const updated_rosters = updateLeagueRostersUsers(rosters, users); // Add user info to rosters
 
-      let draft_picks;
+        const drafts = await fetchLeagueDrafts(league.league_id);
 
-      if (
-        league.settings.type === 2 &&
-        rosters.find((r) => r.players?.length > 0)
-      ) {
-        const traded_picks = await fetchLeagueTradedPicks(league.league_id);
+        // If League is Dynasty and any roster has players, fetch Traded Picks to get draft picks for each roster
 
-        draft_picks = getLeagueDraftPicks({
-          league,
-          rosters: updated_rosters,
-          drafts,
-          traded_picks,
+        let draft_picks;
+
+        if (
+          league.settings.type === 2 &&
+          rosters.find((r) => r.players?.length > 0)
+        ) {
+          const traded_picks = await fetchLeagueTradedPicks(league.league_id);
+
+          draft_picks = getLeagueDraftPicks({
+            league,
+            rosters: updated_rosters,
+            drafts,
+            traded_picks,
+          });
+        }
+
+        const updated_rosters_draft_picks = updated_rosters.map((roster) => {
+          return {
+            ...roster,
+            draft_picks: draft_picks?.[roster.roster_id] || [],
+          };
         });
-      }
 
-      const updated_rosters_draft_picks = updated_rosters.map((roster) => {
         return {
-          ...roster,
-          draft_picks: draft_picks?.[roster.roster_id] || [],
+          league_id: league.league_id,
+          name: league.name,
+          avatar: league.avatar,
+          season: league.season,
+          settings: {
+            ...league.settings,
+            status: league.status,
+            update_league: new Date(),
+          },
+          scoring_settings: league.scoring_settings,
+          roster_positions: league.roster_positions,
+          rosters: updated_rosters_draft_picks,
+          drafts: drafts,
         };
-      });
-
-      return {
-        league_id: league.league_id,
-        name: league.name,
-        avatar: league.avatar,
-        season: league.season,
-        settings: {
-          ...league.settings,
-          status: league.status,
-        },
-        scoring_settings: league.scoring_settings,
-        roster_positions: league.roster_positions,
-        rosters: updated_rosters_draft_picks,
-        drafts: drafts,
-        updatedAt: new Date(),
-      };
+      } catch (err) {
+        console.log(err.message);
+        return {
+          error: {
+            league_id: league_id,
+          },
+        };
+      }
     })
   );
+
+  // Get data to populate associated Tables and through tables
 
   const user_data = [];
   const user_league_data = [];
   const draft_data = [];
 
-  const drafts_delete = [];
-
   leagues_to_add.forEach((league) => {
     league.rosters
-      .filter((roster) => roster.players?.length > 0)
-      .forEach((roster) => {
-        if (parseInt(roster.user_id) > 0) {
-          if (!user_data.find((u) => u.user_id === roster.user_id)) {
+      ?.filter(
+        (roster) => roster.players?.length > 0 && parseInt(roster.user_id) > 0
+      ) // Only rosters with players and user_id
+      ?.forEach((roster) => {
+        // If user not already in user_data array push to array
+        if (!user_data.find((u) => u.user_id === roster.user_id)) {
+          user_data.push({
+            user_id: roster.user_id,
+            username: roster.username,
+            avatar: roster.avatar,
+            type: "LM",
+          });
+        }
+
+        user_league_data.push({
+          userUserId: roster.user_id,
+          leagueLeagueId: league.league_id,
+        });
+
+        // If co_owners and co_owners not already in user_data array, push to array
+        roster.co_owners?.forEach((co) => {
+          if (!user_data.find((u) => u.user_id === co.user_id)) {
             user_data.push({
-              user_id: roster.user_id,
-              username: roster.username,
-              avatar: roster.avatar,
-              type: "",
+              user_id: co.user_id,
+              username: co.username,
+              avatar: co.avatar,
+              type: "LM",
             });
           }
 
           user_league_data.push({
-            userUserId: roster.user_id,
+            userUserId: co.user_id,
             leagueLeagueId: league.league_id,
           });
-
-          roster.co_owners?.forEach((co) => {
-            if (!user_data.find((u) => u.user_id === co.user_id)) {
-              user_data.push({
-                user_id: co.user_id,
-                username: co.username,
-                avatar: co.avatar,
-                type: "",
-              });
-            }
-
-            user_league_data.push({
-              userUserId: co.user_id,
-              leagueLeagueId: league.league_id,
-            });
-          });
-        }
+        });
       });
 
+    // Populate drafts table, exclude drafts with IDP or DEF
     league.drafts
-      .filter(
+      ?.filter(
         (draft) =>
           !draft.settings.slots_dl &&
           !draft.settings.slots_lb &&
@@ -288,7 +278,7 @@ const updateLeagues = async (league_ids) => {
           !draft.settings.slots_idp_flex &&
           !draft.settings.slots_def
       )
-      .forEach((draft) => {
+      ?.forEach((draft) => {
         const {
           draft_id,
           type,
@@ -306,6 +296,7 @@ const updateLeagues = async (league_ids) => {
             ? "R"
             : false;
 
+        //  exclude draft data for Keeper drafts and Rookie drafts
         if (
           league_type &&
           draft.settings.rounds > league.settings.draft_rounds
@@ -321,13 +312,13 @@ const updateLeagues = async (league_ids) => {
             draft_order,
             leagueLeagueId: league.league_id,
           });
-        } else {
-          drafts_delete.push({ draft_id });
         }
       });
   });
 
-  await User.bulkCreate(user_data, { ignoreDuplicates: true });
+  await User.bulkCreate(user_data, {
+    updateOnDuplicate: ["username", "avatar"],
+  });
 
   await League.bulkCreate(
     leagues_to_add.filter((l) => l.league_id),
@@ -339,7 +330,6 @@ const updateLeagues = async (league_ids) => {
         "scoring_settings",
         "roster_positions",
         "rosters",
-        "updatedAt",
       ],
     }
   );
@@ -360,31 +350,9 @@ const updateLeagues = async (league_ids) => {
     ],
   });
 
-  for await (const draft_delete of drafts_delete) {
-    const numDraftsDeleted = await Draft.destroy({
-      where: {
-        draft_id: draft_delete.draft_id,
-      },
-    });
-
-    console.log(`${numDraftsDeleted} Drafts Deleted...`);
-
-    const numDraftPicksDeleted = await DraftPick.destroy({
-      where: {
-        draftDraftId: draft_delete.draft_id,
-      },
-    });
-
-    console.log(`${numDraftPicksDeleted} Draft Picks Deleted...`);
-  }
-
   return leagues_to_add;
 };
 
-const updateUserLeagueRelationships = async (leagues) => {};
-
 module.exports = {
-  splitLeagues: splitLeagues,
-  updateLeagues: updateLeagues,
-  updateUserLeagueRelationships: updateUserLeagueRelationships,
+  updateLeagues,
 };

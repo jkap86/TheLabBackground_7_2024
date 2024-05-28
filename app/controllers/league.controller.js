@@ -23,13 +23,18 @@ exports.league = async (app) => {
   try {
     updated_leagues = await updateLeagues(league_ids);
 
+    const updated_league_ids = updated_leagues.map(
+      (league) => league.league_id
+    );
+
     app.set(
       "league_ids_queue",
       league_ids_queue.filter(
-        (league_id) =>
-          !updated_leagues.map((league) => league.league_id).includes(league_id)
+        (league_id) => !updated_league_ids.includes(league_id)
       )
     );
+
+    app.set("league_ids_trades_queue", updated_league_ids);
 
     console.log(
       `${app.get("league_ids_queue").length} League Ids left in queue...`
@@ -49,7 +54,7 @@ const getLeagueIds = async (league_ids_queue, total_batch_size) => {
 
   if (league_ids_to_add.length < total_batch_size) {
     let leagues_db = await League.findAll({
-      order: [["updatedAt", "ASC"]],
+      order: [[db.sequelize.literal("settings->>'update_league'"), "ASC"]],
       limit: total_batch_size - league_ids_to_add.length,
       attributes: ["league_id"],
       raw: true,

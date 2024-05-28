@@ -6,9 +6,11 @@ const League = db.leagues;
 const Op = db.Sequelize.Op;
 const axios = require("../api/axiosInstance");
 const allplayers = require("../../data/allplayers.json");
+const { fetchUserLeagues } = require("../api/sleeperApi");
 
 exports.user = async (app) => {
   app.set("syncing", true);
+
   console.log("Beginning User Sync...");
 
   const league_ids_queue = app.get("league_ids_queue") || [];
@@ -17,8 +19,9 @@ exports.user = async (app) => {
 
   const state = app.get("state");
 
+  const cutoff = 1 * 60 * 60 * 1000;
   try {
-    // Get User_ids to update
+    // Get User_ids to update - users that have not been updated since cutoff, or just added (updatedAT === createdAT)
 
     let new_users_to_update = await User.findAll({
       order: [["updatedAt", "ASC"]],
@@ -33,7 +36,7 @@ exports.user = async (app) => {
             [Op.or]: [
               {
                 updatedAt: {
-                  [Op.lt]: new Date(new Date() - 6 * 60 * 60 * 1000),
+                  [Op.lt]: new Date(new Date() - cutoff),
                 },
               },
               {
@@ -50,18 +53,20 @@ exports.user = async (app) => {
 
     console.log(`checking ${new_users_to_update.length} users...`);
 
+    // Update type and updatedAt for users retrieved in db query
+
     await User.bulkCreate(
       new_users_to_update.map((user) => {
         return {
           user_id: user.user_id,
-          type: user.type === "RS" ? "S" : user.type,
+          type: user.type === "RS" ? "S" : user.type, // change any RS (recently searched) to S (searched)
           updatedAt: new Date(),
         };
       }),
       { updateOnDuplicate: ["type", "updatedAt"] }
     );
 
-    // Get League_ids to update
+    // Get League_ids to check/upsert from sleeper API for each user in batches
 
     let league_ids_to_check = [];
 
@@ -72,18 +77,19 @@ exports.user = async (app) => {
 
       const batchResults = await Promise.all(
         batch.map(async (user) => {
-          const leagues = await axios.get(
-            `http://api.sleeper.app/v1/user/${user.user_id}/leagues/nfl/${state.league_season}`
+          const leagues = await fetchUserLeagues(
+            user.user_id,
+            state.league_season
           );
 
-          return leagues.data.map((league) => league.league_id);
+          return leagues.map((league) => league.league_id);
         })
       );
 
       league_ids_to_check.push(...batchResults);
     }
 
-    league_ids_to_check = Array.from(new Set(league_ids_to_check.flat()));
+    league_ids_to_check = Array.from(new Set(league_ids_to_check.flat())); // Remove duplicate league_ids
 
     console.log(`${league_ids_to_check.length} League Ids to check...`);
 
@@ -95,7 +101,7 @@ exports.user = async (app) => {
       raw: true,
     });
 
-    console.log({ league_ids_to_check: league_ids_to_check.length });
+    // add league_ids that are not in db and not already in queue to league_ids queue
 
     const new_league_ids = league_ids_to_check.filter(
       (league_id) =>
@@ -103,9 +109,9 @@ exports.user = async (app) => {
         !league_ids_queue.includes(league_id)
     );
 
-    console.log(`${new_league_ids.length} new Leagues added to queue...`);
-
     app.set("league_ids_queue", [...league_ids_queue, ...new_league_ids]);
+
+    console.log(`${new_league_ids.length} new Leagues added to queue...`);
   } catch (error) {
     console.log(error.message);
   }

@@ -10,15 +10,12 @@ const Sequelize = db.Sequelize;
 const sequelize = db.sequelize;
 
 exports.trades = async (app) => {
-  app.set("syncing", true);
-
   console.log("Beginning Trade Sync...");
 
-  const increment = 500;
+  const league_ids = app.get("league_ids_trades_queue") || [];
 
-  let counter = app.get("trades_sync_counter") || 0;
-
-  const leagues = await getLeagues({ increment, counter });
+  console.log(league_ids.length + " leagues to fetch trades for...");
+  const leagues = await getLeagues(league_ids);
 
   const batchSize = 25;
 
@@ -29,6 +26,17 @@ exports.trades = async (app) => {
         week_to_fetch: 1,
       });
 
+      app.set(
+        "league_ids_trades_queue",
+        league_ids.filter(
+          (l) =>
+            !leagues
+              .slice(i, i + batchSize)
+              .map((league) => league.league_id)
+              .includes(l)
+        )
+      );
+
       await Trade.bulkCreate(trades_batch, {
         updateOnDuplicate: ["draft_picks"],
       });
@@ -37,15 +45,6 @@ exports.trades = async (app) => {
     }
   }
 
-  console.log({ counter });
-
-  if (leagues.length < increment) {
-    app.set("trades_sync_counter", 0);
-  } else {
-    app.set("trades_sync_counter", counter + increment);
-  }
-
-  app.set("syncing", false);
   console.log("Trade Sync Complete...");
 };
 
@@ -186,20 +185,15 @@ const getTrades = async ({ leagues, week_to_fetch }) => {
   return trades_batch.flat();
 };
 
-const getLeagues = async ({ increment, counter }) => {
+const getLeagues = async (league_ids) => {
   const leagues_db = await League.findAll({
     attributes: ["league_id", "settings", "rosters", "createdAt"],
     where: {
-      settings: {
-        disable_trades: 0,
-      },
+      league_id: league_ids,
     },
     include: {
       model: Draft,
     },
-    order: [["createdAt", "ASC"]],
-    offset: counter,
-    limit: increment,
   });
 
   return leagues_db;

@@ -30,8 +30,7 @@ function start() {
     });
 
   require("./app/scheduledTasks/daily.routes")(app);
-  require("./app/scheduledTasks/userLeagues.routes")(app);
-  //require("./app/scheduledTasks/trade.routes")(app);
+  require("./app/scheduledTasks/sync.routes")(app);
 
   app.get("*", async (req, res) => {
     res.sendFile(path.join(__dirname, "../client/build/index.html"));
